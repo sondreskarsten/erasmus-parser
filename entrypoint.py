@@ -19,6 +19,8 @@ SNAPSHOT_DATE = os.environ.get("SNAPSHOT_DATE", "")
 ENHETER_BUCKET = os.environ.get("ENHETER_BUCKET", "sondre_brreg_data")
 ENHETER_PREFIX = os.environ.get("ENHETER_PREFIX", "enheter/parsed/v1/state")
 
+TRACKED_FIELDS_ERASMUS = ["org_name", "org_role", "action_type", "grant_eur"]
+
 CHANGELOG_SCHEMA = pa.schema([
     ("orgnr", pa.string()), ("document_id", pa.string()), ("data_source", pa.string()),
     ("event_type", pa.string()), ("event_subtype", pa.string()), ("summary", pa.string()),
@@ -159,9 +161,9 @@ def parse_csv_file(csv_bytes, filename, enheter_lookup):
 
 
 SNAPSHOT_SCHEMA = pa.schema([
-    ("project_id", pa.string()), ("orgnr", pa.string()), ("org_name", pa.string()),
-    ("org_role", pa.string()), ("content_hash", pa.string()),
-])
+    ("project_id", pa.string()), ("orgnr", pa.string()),
+    ("content_hash", pa.string()),
+] + [(f, pa.string()) for f in TRACKED_FIELDS_ERASMUS])
 
 
 def run_cdc(resolved_rows, run_date, run_mode, bucket_name, prefix):
@@ -190,7 +192,13 @@ def run_cdc(resolved_rows, run_date, run_mode, bucket_name, prefix):
         prev_t = read_pq(f"{prefix}/parsed/{prev_dates[-1]}.parquet")
         if prev_t:
             d = prev_t.to_pydict()
-            old_snaps = {(d["project_id"][i], d["orgnr"][i]): d["content_hash"][i] for i in range(prev_t.num_rows)}
+            old_snaps = {}
+            for i in range(prev_t.num_rows):
+                key = (d["project_id"][i], d["orgnr"][i])
+                old_snaps[key] = {"content_hash": d["content_hash"][i]}
+                for f in TRACKED_FIELDS_ERASMUS:
+                    if f in d:
+                        old_snaps[key][f] = d[f][i]
 
     pool_t = read_pq(f"{prefix}/cdc/pool.parquet")
     pool = {}
