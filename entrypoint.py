@@ -215,19 +215,16 @@ def run_cdc(resolved_rows, run_date, run_mode, bucket_name, prefix):
     for row in resolved_rows:
         key = (row["project_id"], row["orgnr"])
         h = row["content_hash"]
-        old_h = old_snaps.get(key)
-        doc_id = f"erasmus-{hashlib.sha256(f'{row["project_id"]}|{row["orgnr"]}'.encode()).hexdigest()[:12]}"
+        old_entry = old_snaps.get(key)
 
-        new_snaps[key] = {"project_id": row["project_id"], "orgnr": row["orgnr"],
-                          "org_name": row["org_name"], "org_role": row["org_role"], "content_hash": h}
-
-        if run_mode == "bootstrap" or old_h is None:
+        if run_mode == "bootstrap" or old_entry is None:
             event_type = "new"
             changed_fields = None
             new_count += 1
-        elif old_h != h:
+        elif old_entry["content_hash"] != h:
             event_type = "modified"
-            changed_fields = json.dumps(["content_hash"])
+            diffs = [f for f in TRACKED_FIELDS_ERASMUS if str(row.get(f) or "") != str(old_entry.get(f) or "")]
+            changed_fields = json.dumps(diffs) if diffs else json.dumps(["content_hash"])
             mod_count += 1
         else:
             continue
@@ -266,7 +263,7 @@ def run_cdc(resolved_rows, run_date, run_mode, bucket_name, prefix):
             pool[orgnr] = {"first_seen": run_date, "last_seen": run_date, "n_participations": 1, "actions": action}
 
     if run_mode != "bootstrap":
-        for key, old_h in old_snaps.items():
+        for key, old_entry in old_snaps.items():
             if key not in new_snaps:
                 changelog_rows.append({
                     "orgnr": key[1], "document_id": f"erasmus-{hashlib.sha256(f'{key[0]}|{key[1]}'.encode()).hexdigest()[:12]}",
