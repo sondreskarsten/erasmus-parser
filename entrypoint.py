@@ -182,11 +182,15 @@ def run_cdc(resolved_rows, run_date, run_mode, bucket_name, prefix):
         buf.seek(0)
         bucket.blob(path).upload_from_file(buf, content_type="application/octet-stream")
 
-    old_snap_t = read_pq(f"{prefix}/cdc/snapshots.parquet")
+    parsed_blobs = [b for b in bucket.list_blobs(prefix=f"{prefix}/parsed/") if b.name.endswith(".parquet")]
+    parsed_dates = sorted(set(b.name.split("/")[-1].replace(".parquet","") for b in parsed_blobs))
+    prev_dates = [d for d in parsed_dates if d < run_date]
     old_snaps = {}
-    if old_snap_t:
-        d = old_snap_t.to_pydict()
-        old_snaps = {(d["project_id"][i], d["orgnr"][i]): d["content_hash"][i] for i in range(old_snap_t.num_rows)}
+    if prev_dates:
+        prev_t = read_pq(f"{prefix}/parsed/{prev_dates[-1]}.parquet")
+        if prev_t:
+            d = prev_t.to_pydict()
+            old_snaps = {(d["project_id"][i], d["orgnr"][i]): d["content_hash"][i] for i in range(prev_t.num_rows)}
 
     pool_t = read_pq(f"{prefix}/cdc/pool.parquet")
     pool = {}
@@ -271,7 +275,7 @@ def run_cdc(resolved_rows, run_date, run_mode, bucket_name, prefix):
     snap_rows = list(new_snaps.values())
     if snap_rows:
         write_pq(pa.Table.from_pylist(snap_rows, schema=SNAPSHOT_SCHEMA),
-                 f"{prefix}/cdc/snapshots.parquet")
+                 f"{prefix}/parsed/{run_date}.parquet")
 
     if pool:
         write_pq(pa.Table.from_pylist([{"orgnr": k, **v} for k, v in pool.items()], schema=POOL_SCHEMA),
