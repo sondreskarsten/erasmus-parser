@@ -158,6 +158,12 @@ def parse_csv_file(csv_bytes, filename, enheter_lookup):
     return resolved, unresolved
 
 
+SNAPSHOT_SCHEMA = pa.schema([
+    ("project_id", pa.string()), ("orgnr", pa.string()), ("org_name", pa.string()),
+    ("org_role", pa.string()), ("content_hash", pa.string()),
+])
+
+
 def run_cdc(resolved_rows, run_date, run_mode, bucket_name, prefix):
     run_id = str(uuid.uuid4())[:8]
     detected_time = datetime.now(timezone.utc).isoformat()
@@ -176,10 +182,44 @@ def run_cdc(resolved_rows, run_date, run_mode, bucket_name, prefix):
         buf.seek(0)
         bucket.blob(path).upload_from_file(buf, content_type="application/octet-stream")
 
+    old_snap_t = read_pq(f"{prefix}/cdc/snapshots.parquet")
+    old_snaps = {}
+    if old_snap_t:
+        d = old_snap_t.to_pydict()
+        old_snaps = {(d["project_id"][i], d["orgnr"][i]): d["content_hash"][i] for i in range(old_snap_t.num_rows)}
+
+    pool_t = read_pq(f"{prefix}/cdc/pool.parquet")
     pool = {}
+    if pool_t:
+        d = pool_t.to_pydict()
+        pool = {d["orgnr"][i]: {"first_seen": d["first_seen"][i], "last_seen": d["last_seen"][i],
+                                "n_participations": d["n_participations"][i], "actions": d["actions"][i]} for i in range(pool_t.num_rows)}
+
     changelog_rows = []
+    new_snaps = {}
+    new_count = 0
+    mod_count = 0
 
     for row in resolved_rows:
+        key = (row["project_id"], row["orgnr"])
+        h = row["content_hash"]
+        old_h = old_snaps.get(key)
+        doc_id = f"erasmus-{hashlib.sha256(f'{row["project_id"]}|{row["orgnr"]}'.encode()).hexdigest()[:12]}"
+
+        new_snaps[key] = {"project_id": row["project_id"], "orgnr": row["orgnr"],
+                          "org_name": row["org_name"], "org_role": row["org_role"], "content_hash": h}
+
+        if run_mode == "bootstrap" or old_h is None:
+            event_type = "new"
+            changed_fields = None
+            new_count += 1
+        elif old_h != h:
+            event_type = "modified"
+            changed_fields = json.dumps(["content_hash"])
+            mod_count += 1
+        else:
+            continue
+
         action = row.get("action_type", "")
         summary = " — ".join(filter(None, [
             row["org_role"], row["org_name"][:40],
@@ -190,12 +230,12 @@ def run_cdc(resolved_rows, run_date, run_mode, bucket_name, prefix):
         details = {k: v for k, v in row.items() if k != "content_hash"}
         changelog_rows.append({
             "orgnr": row["orgnr"],
-            "document_id": f"erasmus-{row['project_id']}-{row['org_name'][:20]}",
+            "document_id": doc_id,
             "data_source": "erasmus",
-            "event_type": "new",
+            "event_type": event_type,
             "event_subtype": f"erasmus_{row['org_role']}",
             "summary": summary,
-            "changed_fields": None,
+            "changed_fields": changed_fields,
             "valid_time": f"{row.get('call_year','2024')}-01-01" if row.get("call_year") else run_date,
             "detected_time": detected_time,
             "details_json": json.dumps(details, ensure_ascii=False),
@@ -213,15 +253,31 @@ def run_cdc(resolved_rows, run_date, run_mode, bucket_name, prefix):
         else:
             pool[orgnr] = {"first_seen": run_date, "last_seen": run_date, "n_participations": 1, "actions": action}
 
+    if run_mode != "bootstrap":
+        for key, old_h in old_snaps.items():
+            if key not in new_snaps:
+                changelog_rows.append({
+                    "orgnr": key[1], "document_id": f"erasmus-{hashlib.sha256(f'{key[0]}|{key[1]}'.encode()).hexdigest()[:12]}",
+                    "data_source": "erasmus", "event_type": "disappeared", "event_subtype": "erasmus_participation_ended",
+                    "summary": f"Participation ended: {key[0]}", "changed_fields": None,
+                    "valid_time": run_date, "detected_time": detected_time, "details_json": None,
+                    "source_run_mode": run_mode, "run_id": run_id,
+                })
+
     if changelog_rows:
         write_pq(pa.Table.from_pylist(changelog_rows, schema=CHANGELOG_SCHEMA),
                  f"{prefix}/cdc/changelog/{run_date}.parquet")
+
+    snap_rows = list(new_snaps.values())
+    if snap_rows:
+        write_pq(pa.Table.from_pylist(snap_rows, schema=SNAPSHOT_SCHEMA),
+                 f"{prefix}/cdc/snapshots.parquet")
 
     if pool:
         write_pq(pa.Table.from_pylist([{"orgnr": k, **v} for k, v in pool.items()], schema=POOL_SCHEMA),
                  f"{prefix}/cdc/pool.parquet")
 
-    return {"changelog_rows": len(changelog_rows), "pool_size": len(pool)}
+    return {"new": new_count, "modified": mod_count, "changelog_rows": len(changelog_rows), "pool_size": len(pool)}
 
 
 def main():
