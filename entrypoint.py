@@ -245,6 +245,7 @@ def run_cdc(resolved_rows, run_date, run_mode, bucket_name, prefix):
             "event_subtype": f"erasmus_{row['org_role']}",
             "summary": summary,
             "changed_fields": changed_fields,
+            # REVIEW: valid_time = call_year synthetic date. State register diffed like enheter — should be snapshot date. See valid_time_audit.md
             "valid_time": f"{row.get('call_year','2024')}-01-01" if row.get("call_year") else run_date,
             "detected_time": detected_time,
             "details_json": json.dumps(details, ensure_ascii=False),
